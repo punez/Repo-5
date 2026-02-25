@@ -1,106 +1,106 @@
-import asyncio
-import aiohttp
-import time
-from urllib.parse import urlparse, parse_qs
+import requests
+import base64
+import json
+from urllib.parse import urlparse, parse_qs, urlunparse
 
-TIMEOUT = 3
-CONCURRENCY = 150
-MAX_OUTPUT = 10000
+MAX_TOTAL = 10000
 
-def extract_params(link):
+SOURCES = [
+    "https://raw.githubusercontent.com/punez/Repo-4/refs/heads/main/healthy.txt",
+    "https://raw.githubusercontent.com/punez/Repo-2/refs/heads/main/healthy.txt",
+    "https://raw.githubusercontent.com/punez/Repo-3/refs/heads/main/healthy.txt",
+    "https://raw.githubusercontent.com/punez/Repo-1/refs/heads/main/healthy.txt",
+]
+
+def safe_b64_decode(data):
     try:
+        missing_padding = len(data) % 4
+        if missing_padding:
+            data += '=' * (4 - missing_padding)
+        return base64.b64decode(data).decode("utf-8")
+    except:
+        return None
+
+def fetch(url):
+    try:
+        r = requests.get(url, timeout=20)
+        return r.text.splitlines()
+    except:
+        return []
+
+def fingerprint(link):
+    try:
+        if link.startswith("vmess://"):
+            raw = link.replace("vmess://", "")
+            decoded = safe_b64_decode(raw)
+            if not decoded:
+                return None
+            data = json.loads(decoded)
+            return f"vmess-{data.get('add')}-{data.get('port')}-{data.get('id')}-{data.get('sni')}-{data.get('path')}"
+
         parsed = urlparse(link)
-        scheme = parsed.scheme
+        qs = parse_qs(parsed.query)
+
+        protocol = parsed.scheme
         host = parsed.hostname
         port = parsed.port
-        query = parse_qs(parsed.query)
+        user = parsed.username
 
-        return {
-            "scheme": scheme,
-            "host": host,
-            "port": port,
-            "id": parsed.username,
-            "network": query.get("type", [""])[0],
-            "path": query.get("path", [""])[0],
-            "security": query.get("security", [""])[0],
-            "sni": query.get("sni", [""])[0],
-            "alpn": query.get("alpn", [""])[0],
-        }
+        sni = qs.get("sni", [""])[0] or qs.get("serverName", [""])[0]
+        path = qs.get("path", [""])[0]
+
+        return f"{protocol}-{host}-{port}-{user}-{sni}-{path}"
     except:
         return None
 
-def fingerprint(p):
-    if not p:
-        return None
-    return "|".join([
-        str(p.get("scheme")),
-        str(p.get("host")),
-        str(p.get("port")),
-        str(p.get("id")),
-        str(p.get("network")),
-        str(p.get("path")),
-        str(p.get("security")),
-        str(p.get("sni")),
-        str(p.get("alpn")),
-    ])
-
-async def tcp_latency(host, port):
+def rename_config(link, new_name):
     try:
-        start = time.time()
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(host, port),
-            timeout=TIMEOUT
-        )
-        latency = (time.time() - start) * 1000
-        writer.close()
-        await writer.wait_closed()
-        return latency
+        if link.startswith("vmess://"):
+            raw = link.replace("vmess://", "")
+            decoded = safe_b64_decode(raw)
+            if not decoded:
+                return link
+            data = json.loads(decoded)
+            data["ps"] = new_name
+            new_encoded = base64.b64encode(
+                json.dumps(data, separators=(',', ':')).encode()
+            ).decode()
+            return "vmess://" + new_encoded
+
+        parsed = urlparse(link)
+        return urlunparse(parsed._replace(fragment=new_name))
     except:
-        return None
+        return link
 
-async def main():
-    sources = open("inputs.txt").read().splitlines()
-    links = set()
-
-    async with aiohttp.ClientSession() as session:
-        for url in sources:
-            try:
-                async with session.get(url, timeout=20) as resp:
-                    text = await resp.text()
-                    for line in text.splitlines():
-                        if "://" in line:
-                            links.add(line.strip())
-            except:
-                pass
+def main():
+    all_links = []
+    for url in SOURCES:
+        all_links.extend(fetch(url))
 
     seen = set()
-    unique = []
+    final = []
+    counter = 1
 
-    for link in links:
-        p = extract_params(link)
-        fp = fingerprint(p)
-        if fp and fp not in seen:
+    for link in all_links:
+        link = link.strip()
+        if not link:
+            continue
+
+        fp = fingerprint(link)
+        if not fp:
+            continue
+
+        if fp not in seen:
             seen.add(fp)
-            unique.append((link, p))
+            renamed = rename_config(link, f"Final-{counter}")
+            final.append(renamed)
+            counter += 1
 
-    sem = asyncio.Semaphore(CONCURRENCY)
-    results = []
-
-    async def check(item):
-        async with sem:
-            link, p = item
-            if p and p["host"] and p["port"]:
-                latency = await tcp_latency(p["host"], p["port"])
-                if latency is not None:
-                    results.append((latency, link))
-
-    await asyncio.gather(*(check(i) for i in unique))
-
-    results.sort(key=lambda x: x[0])
-
-    final_links = [r[1] for r in results[:MAX_OUTPUT]]
+        if len(final) >= MAX_TOTAL:
+            break
 
     with open("final.txt", "w") as f:
-        f.write("\n".join(final_links))
+        f.write("\n".join(final))
 
-asyncio.run(main())
+if __name__ == "__main__":
+    main()
