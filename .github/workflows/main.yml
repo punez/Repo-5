@@ -2,7 +2,7 @@ name: Global Merge
 
 on:
   schedule:
-    - cron: "15 */6 * * *"
+    - cron: "15 */6 * * *"   # هر 6 ساعت، 15 دقیقه بعد از Repo-4
   workflow_dispatch:
 
 jobs:
@@ -10,17 +10,22 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
-      - uses: actions/setup-python@v4
+      - name: Setup Python
+        uses: actions/setup-python@v4
         with:
           python-version: 3.10
 
-      - run: pip install -r requirements.txt
+      - name: Install dependencies
+        run: pip install -r requirements.txt
 
-      - run: python main_filter.py
+      - name: Run Merge Script
+        run: python main_filter.py
 
-      - run: |
+      - name: Commit and Push final.txt
+        run: |
           git config --global user.name "bot"
           git config --global user.email "bot@github.com"
           git add final.txt
