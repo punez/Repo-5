@@ -16,7 +16,7 @@ SOURCE_URLS = [
 OUTPUT_FILE = "alive.txt"
 TIMEOUT = 1.5
 CONCURRENCY = 200
-MAX_ALIVE = 5000           # وقتی به این عدد رسید، تست بقیه رو متوقف می‌کنه
+MAX_ALIVE = 20000           # وقتی به این عدد رسید، تست بقیه رو متوقف می‌کنه
 
 def log(msg):
     print(f"[{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}] {msg}")
