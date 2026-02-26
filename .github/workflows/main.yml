@@ -2,7 +2,7 @@ name: Global Merge
 
 on:
   schedule:
-    - cron: "15 */6 * * *"
+    - cron: "30 */6 * * *"
   workflow_dispatch:
 
 jobs:
