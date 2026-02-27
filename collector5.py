@@ -33,7 +33,7 @@ def log(msg):
 
 async def fetch_links(session, url):
     try:
-        async with session.get(url, timeout=15) as resp:
+        async with session.get(url + f"?t={int(time.time())}", timeout=15) as resp:
             text = await resp.text()
             return {l.strip() for l in text.splitlines() if l.strip()}
     except:
