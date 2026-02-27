@@ -1,125 +1,172 @@
 import asyncio
 import aiohttp
+import json
+import yaml
+import subprocess
+import tempfile
+import os
 import random
 from datetime import datetime
 
-# تنظیمات
-SOURCE_URLS = [
-    "https://raw.githubusercontent.com/punez/Repo-4/refs/heads/main/final_sub.txt",
-    "https://raw.githubusercontent.com/punez/Repo-2/refs/heads/main/final.txt",
-    "https://raw.githubusercontent.com/punez/Repo-3/refs/heads/main/final.txt",
-    "https://raw.githubusercontent.com/punez/Repo-1/refs/heads/main/final.txt",
-    "https://raw.githubusercontent.com/punez/Repo-0/refs/heads/main/final.txt",
-    # ↑↑↑ اینجا یوزرنیم و اسم ریپوها رو درست وارد کن
-]
-
+# تنظیمات مهم
+SOURCE_URLS = [ ... ]  # همون لیست قبلی‌ات
 OUTPUT_FILE = "alive.txt"
-TIMEOUT = 1.5
-CONCURRENCY = 200
-MAX_ALIVE = 20000           # وقتی به این عدد رسید، تست بقیه رو متوقف می‌کنه
+MAX_ALIVE = 5000          # سقف منطقی
+CONCURRENCY = 50          # کمتر از قبل، چون sing-box سنگین‌تره
+TEST_URL = "http://www.gstatic.com/generate_204"   # یا cloudflare.com/cdn-cgi/trace
+TIMEOUT = 8               # ثانیه برای کل تست
 
 def log(msg):
     print(f"[{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}] {msg}")
 
-def extract_host_port(link):
-    link = link.strip()
-    if not link: return None, None
+async def fetch_links(session, url):
+    "https://raw.githubusercontent.com/punez/Repo-4/refs/heads/main/final_sub.txt",
+    "https://raw.githubusercontent.com/punez/Repo-2/refs/heads/main/final.txt",
+    "https://raw.githubusercontent.com/punez/Repo-3/refs/heads/main/final.txt",
+    "https://raw.githubusercontent.com/punez/Repo-1/refs/heads/main/final.txt",
+    "https://raw.githubusercontent.com/punez/Repo-0/refs/heads/main/final.txt"
 
-    try:
-        if link.startswith("vmess://"):
-            import base64, json
-            raw = link[8:].split("#", 1)[0]
-            decoded = base64.b64decode(raw + "===").decode(errors="ignore")
-            data = json.loads(decoded)
-            return data.get("add"), data.get("port")
+def generate_singbox_config(link):
+    """کانفیگ ساده sing-box فقط برای تست این outbound"""
+    config = {
+        "log": {"level": "silent"},
+        "inbounds": [
+            {
+                "type": "direct",
+                "tag": "direct-in",
+                "listen": "127.0.0.1",
+                "listen_port": 0  # random port بعداً
+            }
+        ],
+        "outbounds": [
+            {"type": "direct", "tag": "direct"},
+            {"type": "block", "tag": "block"}
+        ],
+        "route": {
+            "rules": [
+                {"outbound": "direct"}
+            ]
+        }
+    }
 
-        elif link.startswith(("vless://", "trojan://")):
-            from urllib.parse import urlparse
-            u = urlparse(link.split("#", 1)[0])
-            return u.hostname, u.port or 443
+    # تبدیل لینک به outbound sing-box
+    # این قسمت نیاز به parser داره (می‌تونی از کتابخانه یا دستی بنویسی)
+    # مثال ساده برای vless / vmess / trojan
+    if link.startswith("vless://"):
+        # parse کن و outbound بساز (اینجا ساده نوشتم - کاملش کن)
+        outbound = {
+            "type": "vless",
+            "tag": "test-out",
+            "server": "parsed_host",
+            "server_port": 443,
+            "uuid": "parsed_uuid",
+            "flow": "xtls-rprx-vision",  # اگر reality باشه
+            "tls": {
+                "enabled": True,
+                "server_name": "parsed_sni",
+                "reality": {
+                    "enabled": True,
+                    "public_key": "parsed_pubkey",
+                    "short_id": "parsed_shortid"
+                }
+            }
+        }
+        config["outbounds"].append(outbound)
+        config["route"]["rules"][0]["outbound"] = "test-out"
 
-        else:
-            after = link.split("://", 1)[1].split("#", 1)[0].split("?", 1)[0]
-            if "@" in after:
-                after = after.split("@")[-1]
-            if ":" in after:
-                host, port = after.rsplit(":", 1)
-                return host.strip(), port.strip()
-        return None, None
-    except:
-        return None, None
+    # برای vmess/trojan هم مشابه
+    # ...
 
-async def tcp_check(host, port, semaphore, counter):
+    return yaml.dump(config, allow_unicode=True, sort_keys=False)
+
+async def test_with_singbox(link, semaphore):
     async with semaphore:
-        if counter["count"] >= MAX_ALIVE:
-            return False
+        if len(alive) >= MAX_ALIVE:
+            return None
+
+        config_str = generate_singbox_config(link)
+        if not config_str:
+            return None
+
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.yaml') as tmp:
+            tmp.write(config_str)
+            config_path = tmp.name
 
         try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, int(port)),
-                timeout=TIMEOUT
+            # sing-box check config اول
+            check = subprocess.run(["./sing-box", "check", "-c", config_path], capture_output=True, timeout=10)
+            if check.returncode != 0:
+                os.unlink(config_path)
+                return None
+
+            # run sing-box و تست delay
+            proc = await asyncio.create_subprocess_exec(
+                "./sing-box", "run", "-c", config_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
             )
-            writer.close()
-            await writer.wait_closed()
 
-            if counter["count"] < MAX_ALIVE:
-                counter["count"] += 1
-                return True
-            return False
-        except:
-            return False
+            # منتظر startup (چند ثانیه)
+            await asyncio.sleep(2)
 
-async def fetch_links(session, url):
-    try:
-        async with session.get(url, timeout=15) as resp:
-            if resp.status != 200:
-                log(f"خطا در دانلود {url} → وضعیت {resp.status}")
-                return set()
-            text = await resp.text()
-            links = {line.strip() for line in text.splitlines() if line.strip()}
-            log(f"از {url} → {len(links)} لینک خوانده شد")
-            return links
-    except Exception as e:
-        log(f"خطا در دانلود {url}: {e}")
-        return set()
+            # تست واقعی با curl داخل sing-box یا urltest
+            test_cmd = [
+                "curl", "--proxy", "socks5h://127.0.0.1:10808",  # فرض socks inbound اضافه کن
+                "-o", "/dev/null", "-s", "-w", "%{time_connect}",
+                TEST_URL
+            ]
+            test_proc = await asyncio.create_subprocess_exec(*test_cmd, stdout=asyncio.subprocess.PIPE)
+            stdout, _ = await test_proc.communicate()
+            delay_str = stdout.decode().strip()
+
+            await proc.terminate()
+            try:
+                await proc.wait()
+            except:
+                pass
+
+            delay = float(delay_str) if delay_str else 9999
+            if delay < 8 and test_proc.returncode == 0:  # موفق
+                os.unlink(config_path)
+                return link, delay
+
+        except Exception as e:
+            log(f"Error testing {link[:60]}...: {e}")
+        finally:
+            if os.path.exists(config_path):
+                os.unlink(config_path)
+
+        return None
 
 async def main():
-    log("Repo-5 شروع: دانلود + ترکیب + تست TCP سریع")
+    log("شروع تست با sing-box")
 
     all_links = set()
     async with aiohttp.ClientSession() as session:
         tasks = [fetch_links(session, url) for url in SOURCE_URLS]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks)
         for res in results:
-            if isinstance(res, set):
-                all_links.update(res)
+            all_links.update(res)
 
-    total = len(all_links)
-    log(f"مجموع لینک‌های یکتا قبل از تست: {total:,}")
-
-    if total == 0:
-        log("هیچ لینکی نبود")
-        return
+    log(f"تعداد لینک قبل تست: {len(all_links):,}")
 
     semaphore = asyncio.Semaphore(CONCURRENCY)
-    counter = {"count": 0}
+    global alive
     alive = []
 
-    async def check(link):
-        host, port = extract_host_port(link)
-        if host and port:
-            if await tcp_check(host, port, semaphore, counter):
-                alive.append(link)
+    tasks = [test_with_singbox(link, semaphore) for link in all_links]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    await asyncio.gather(*(check(link) for link in all_links), return_exceptions=True)
+    valid = [r[0] for r in results if isinstance(r, tuple) and r]
+    valid.sort(key=lambda x: x[1])  # sort بر اساس delay اگر خواستی
 
-    random.shuffle(alive)
+    random.shuffle(valid)  # یا نگه دار sorted
 
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        for link in alive:
-            f.write(link + "\n")          # هر لینک در یک خط
+        for link in valid:
+            f.write(link + "\n")
 
-    log(f"پایان: {len(alive):,} نود زنده (حداکثر {MAX_ALIVE:,}) → {OUTPUT_FILE}")
+    log(f"زنده ماند: {len(valid):,} نود")
 
 if __name__ == "__main__":
     asyncio.run(main())
