@@ -14,13 +14,14 @@ OUTPUT_FILE = "alive.txt"
 TCP_TIMEOUT = 3
 CONCURRENCY = 300
 LATENCY_LIMIT_MS = 300
-TOP_PERCENT = 0.30  # فقط سریع‌ترین 30٪
+TOP_PERCENT = 0.30
+MAX_JITTER = 80
+SUPER_FAST_THRESHOLD = 30
+SUPER_FAST_CONFIRM = 50
 
 def log(msg):
     ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     print(f"[{ts}] {msg}")
-
-# ---------------- FETCH ---------------- #
 
 async def fetch_links(session, url):
     try:
@@ -29,8 +30,6 @@ async def fetch_links(session, url):
             return {l.strip() for l in text.splitlines() if l.strip()}
     except:
         return set()
-
-# ---------------- PARSE ---------------- #
 
 def parse_link(link):
     try:
@@ -47,8 +46,6 @@ def parse_link(link):
         return None
     return None
 
-# ---------------- TCP LATENCY ---------------- #
-
 async def tcp_latency(host, port, semaphore):
     async with semaphore:
         try:
@@ -64,8 +61,6 @@ async def tcp_latency(host, port, semaphore):
         except:
             return None
 
-# ---------------- MAIN ---------------- #
-
 async def main():
     log("Stage 1: Fetch")
 
@@ -75,7 +70,7 @@ async def main():
         all_links = set().union(*results)
 
     log(f"Total raw links: {len(all_links):,}")
-    log("Stage 2: TCP latency filtering (<300ms + double check)")
+    log("Stage 2: TCP latency filtering (stability + super-fast guard)")
 
     semaphore = asyncio.Semaphore(CONCURRENCY)
 
@@ -98,7 +93,18 @@ async def main():
         if latency2 is None or latency2 >= LATENCY_LIMIT_MS:
             return None
 
+        # Stability check (Jitter)
+        if abs(latency1 - latency2) > MAX_JITTER:
+            return None
+
         avg_latency = (latency1 + latency2) / 2
+
+        # Super-fast guard
+        if avg_latency < SUPER_FAST_THRESHOLD:
+            latency3 = await tcp_latency(host, port, semaphore)
+            if latency3 is None or latency3 > SUPER_FAST_CONFIRM:
+                return None
+
         return (link, avg_latency)
 
     tasks = [process(l) for l in all_links]
@@ -106,12 +112,10 @@ async def main():
 
     valid = [r for r in checked if r]
 
-    log(f"Passed double-check: {len(valid):,}")
+    log(f"Passed stability filter: {len(valid):,}")
 
-    # مرتب‌سازی بر اساس سریع‌ترین
     valid.sort(key=lambda x: x[1])
 
-    # فقط سریع‌ترین 30٪
     cut_count = int(len(valid) * TOP_PERCENT)
     final_nodes = [v[0] for v in valid[:cut_count]]
 
@@ -119,7 +123,7 @@ async def main():
         for node in final_nodes:
             f.write(node + "\n")
 
-    log(f"Done: {len(final_nodes):,} elite fast nodes (top 30%)")
+    log(f"Done: {len(final_nodes):,} elite stable nodes")
 
 if __name__ == "__main__":
     asyncio.run(main())
