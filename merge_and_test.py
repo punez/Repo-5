@@ -21,8 +21,10 @@ OUTPUT_FILE = "alive.txt"
 TCP_TIMEOUT = 1.2
 TCP_CONCURRENCY = 200
 
-SINGBOX_CONCURRENCY = 20
-BOOT_WAIT = 2.5
+SINGBOX_CONCURRENCY = 15
+BOOT_WAIT = 2.0
+SOCKS_PORT = 10809
+
 MAX_ALIVE = 3000
 
 # ============================================
@@ -77,13 +79,12 @@ async def tcp_check(host, port, sem):
 
 
 # =========================================================
-# Build Outbound (VLESS / Trojan / VMess)
+# Build Outbound
 # =========================================================
 
 def build_outbound(link):
 
     try:
-
         if link.startswith("vless://"):
             u = urllib.parse.urlparse(link)
             q = urllib.parse.parse_qs(u.query)
@@ -124,7 +125,7 @@ def build_outbound(link):
             u = urllib.parse.urlparse(link)
             q = urllib.parse.parse_qs(u.query)
 
-            outbound = {
+            return {
                 "type": "trojan",
                 "tag": "probe",
                 "server": u.hostname,
@@ -135,8 +136,6 @@ def build_outbound(link):
                     "server_name": q.get("sni", [u.hostname])[0]
                 }
             }
-
-            return outbound
 
         if link.startswith("vmess://"):
             raw = link[8:].split("#")[0]
@@ -168,7 +167,12 @@ def build_outbound(link):
 def build_config(outbound):
     return yaml.safe_dump({
         "log": {"level": "error"},
-        "inbounds": [],
+        "inbounds": [{
+            "type": "socks",
+            "tag": "socks-in",
+            "listen": "127.0.0.1",
+            "listen_port": SOCKS_PORT
+        }],
         "outbounds": [
             outbound,
             {"type": "direct", "tag": "direct"}
@@ -180,7 +184,7 @@ def build_config(outbound):
 
 
 # =========================================================
-# Handshake Test (No curl)
+# Handshake Test (Real outbound usage)
 # =========================================================
 
 async def singbox_test(link, sem, counter):
@@ -201,7 +205,6 @@ async def singbox_test(link, sem, counter):
             path = f.name
 
         try:
-            # فقط چک صحت کانفیگ
             subprocess.run(
                 ["./sing-box", "check", "-c", path],
                 timeout=5,
@@ -209,7 +212,6 @@ async def singbox_test(link, sem, counter):
                 check=True
             )
 
-            # اجرای کوتاه برای تست handshake
             proc = await asyncio.create_subprocess_exec(
                 "./sing-box", "run", "-c", path,
                 stdout=asyncio.subprocess.DEVNULL,
@@ -218,11 +220,24 @@ async def singbox_test(link, sem, counter):
 
             await asyncio.sleep(BOOT_WAIT)
 
-            # اگر اینجا crash نکرده باشه یعنی handshake انجام شده
-            if proc.returncode is None:
+            # اتصال ساده از داخل socks برای فعال شدن outbound
+            test = await asyncio.create_subprocess_exec(
+                "curl",
+                "-x", f"socks5h://127.0.0.1:{SOCKS_PORT}",
+                "--connect-timeout", "3",
+                "-s",
+                "http://1.1.1.1",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL
+            )
+
+            await test.wait()
+
+            proc.terminate()
+            await proc.wait()
+
+            if test.returncode == 0:
                 counter["count"] += 1
-                proc.terminate()
-                await proc.wait()
                 return link
 
         except:
@@ -269,7 +284,7 @@ async def main():
         log("No nodes passed TCP")
         return
 
-    log("Stage 2: TLS/Handshake validation")
+    log("Stage 2: Outbound handshake validation")
 
     sb_sem = asyncio.Semaphore(SINGBOX_CONCURRENCY)
     counter = {"count": 0}
