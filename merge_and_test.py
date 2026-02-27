@@ -10,7 +10,8 @@ import base64
 import json
 from datetime import datetime
 
-# ========= تنظیمات =========
+# ================= SETTINGS =================
+
 SOURCE_URLS = [
     "https://raw.githubusercontent.com/punez/Repo-4/refs/heads/main/final_sub.txt",
 ]
@@ -20,35 +21,46 @@ OUTPUT_FILE = "alive.txt"
 TCP_TIMEOUT = 1.2
 TCP_CONCURRENCY = 200
 
-SINGBOX_CONCURRENCY = 20
+SINGBOX_CONCURRENCY = 15
 TEST_URL = "http://www.gstatic.com/generate_204"
 TEST_TIMEOUT = 6
+BOOT_WAIT = 2.5
 
-MAX_ALIVE = 2000
-# ===========================
+MAX_ALIVE = 3000
+
+# ============================================
 
 
 def log(msg):
     print(f"[{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}] {msg}")
 
 
-# ---------------------------
-# Stage 1 – Fetch + TCP
-# ---------------------------
+# =========================================================
+# Fetch
+# =========================================================
 
 async def fetch_links(session, url):
     try:
         async with session.get(url, timeout=15) as resp:
             text = await resp.text()
-            return {l.strip() for l in text.splitlines() if l.strip().startswith("vless://")}
+            return {l.strip() for l in text.splitlines() if l.strip()}
     except:
         return set()
 
 
+# =========================================================
+# TCP Stage
+# =========================================================
+
 def extract_host_port(link):
     try:
-        u = urllib.parse.urlparse(link.split("#")[0])
-        return u.hostname, u.port or 443
+        if link.startswith("vmess://"):
+            raw = link[8:].split("#")[0]
+            data = json.loads(base64.b64decode(raw + "===").decode())
+            return data.get("add"), int(data.get("port"))
+        else:
+            u = urllib.parse.urlparse(link.split("#")[0])
+            return u.hostname, u.port or 443
     except:
         return None, None
 
@@ -67,44 +79,119 @@ async def tcp_check(host, port, sem):
             return False
 
 
-# ---------------------------
-# Stage 2 – sing-box real test
-# ---------------------------
+# =========================================================
+# Build Outbounds
+# =========================================================
 
-def parse_vless_reality(link):
-    try:
-        u = urllib.parse.urlparse(link)
-        uuid = u.username
-        host = u.hostname
-        port = u.port or 443
-        q = urllib.parse.parse_qs(u.query)
+def build_vless(link):
+    u = urllib.parse.urlparse(link)
+    q = urllib.parse.parse_qs(u.query)
 
-        flow = q.get("flow", [""])[0]
-        security = q.get("security", [""])[0]
-        sni = q.get("sni", [""])[0] or host
-        fp = q.get("fp", ["chrome"])[0]
-        pbk = q.get("pbk", [""])[0]
-        sid = q.get("sid", [""])[0]
+    outbound = {
+        "type": "vless",
+        "tag": "probe",
+        "server": u.hostname,
+        "server_port": u.port or 443,
+        "uuid": u.username,
+        "tls": {"enabled": False}
+    }
 
-        if security != "reality" or not flow:
-            return None
+    security = q.get("security", [""])[0]
 
-        return {
-            "type": "vless",
-            "tag": "probe",
-            "server": host,
-            "server_port": port,
-            "uuid": uuid,
-            "flow": flow,
-            "tls": {
-                "enabled": True,
-                "server_name": sni,
-                "utls": {"enabled": True, "fingerprint": fp},
-                "reality": {"enabled": True, "public_key": pbk, "short_id": sid}
-            }
+    if security in ["tls", "reality"]:
+        outbound["tls"] = {
+            "enabled": True,
+            "server_name": q.get("sni", [u.hostname])[0]
         }
+
+        if security == "reality":
+            outbound["tls"]["reality"] = {
+                "enabled": True,
+                "public_key": q.get("pbk", [""])[0],
+                "short_id": q.get("sid", [""])[0]
+            }
+
+    net = q.get("type", ["tcp"])[0]
+
+    if net == "ws":
+        outbound["transport"] = {
+            "type": "ws",
+            "path": q.get("path", ["/"])[0],
+            "headers": {"Host": q.get("host", [""])[0]}
+        }
+
+    if q.get("flow"):
+        outbound["flow"] = q["flow"][0]
+
+    return outbound
+
+
+def build_trojan(link):
+    u = urllib.parse.urlparse(link)
+    q = urllib.parse.parse_qs(u.query)
+
+    outbound = {
+        "type": "trojan",
+        "tag": "probe",
+        "server": u.hostname,
+        "server_port": u.port or 443,
+        "password": u.username,
+        "tls": {
+            "enabled": True,
+            "server_name": q.get("sni", [u.hostname])[0]
+        }
+    }
+
+    if q.get("type", ["tcp"])[0] == "ws":
+        outbound["transport"] = {
+            "type": "ws",
+            "path": q.get("path", ["/"])[0],
+            "headers": {"Host": q.get("host", [""])[0]}
+        }
+
+    return outbound
+
+
+def build_vmess(link):
+    raw = link[8:].split("#")[0]
+    data = json.loads(base64.b64decode(raw + "===").decode())
+
+    outbound = {
+        "type": "vmess",
+        "tag": "probe",
+        "server": data["add"],
+        "server_port": int(data["port"]),
+        "uuid": data["id"],
+        "security": data.get("scy", "auto")
+    }
+
+    if data.get("tls") == "tls":
+        outbound["tls"] = {
+            "enabled": True,
+            "server_name": data.get("sni", data["add"])
+        }
+
+    if data.get("net") == "ws":
+        outbound["transport"] = {
+            "type": "ws",
+            "path": data.get("path", "/"),
+            "headers": {"Host": data.get("host", "")}
+        }
+
+    return outbound
+
+
+def build_outbound(link):
+    try:
+        if link.startswith("vless://"):
+            return build_vless(link)
+        if link.startswith("trojan://"):
+            return build_trojan(link)
+        if link.startswith("vmess://"):
+            return build_vmess(link)
     except:
         return None
+    return None
 
 
 def build_config(outbound):
@@ -124,12 +211,17 @@ def build_config(outbound):
     }, sort_keys=False)
 
 
+# =========================================================
+# sing-box Test
+# =========================================================
+
 async def singbox_test(link, sem, counter):
     async with sem:
+
         if counter["count"] >= MAX_ALIVE:
             return None
 
-        outbound = parse_vless_reality(link)
+        outbound = build_outbound(link)
         if not outbound:
             return None
 
@@ -149,7 +241,7 @@ async def singbox_test(link, sem, counter):
                 stderr=asyncio.subprocess.DEVNULL
             )
 
-            await asyncio.sleep(1.8)
+            await asyncio.sleep(BOOT_WAIT)
 
             curl = await asyncio.create_subprocess_exec(
                 "curl",
@@ -174,27 +266,30 @@ async def singbox_test(link, sem, counter):
         except:
             pass
         finally:
-            os.unlink(path)
+            if os.path.exists(path):
+                os.unlink(path)
 
         return None
 
 
-# ---------------------------
-# Main
-# ---------------------------
+# =========================================================
+# MAIN
+# =========================================================
 
 async def main():
-    log("Stage 1: Fetch + TCP filtering")
+
+    log("Stage 1: Fetch")
 
     all_links = set()
+
     async with aiohttp.ClientSession() as session:
-        results = await asyncio.gather(
-            *(fetch_links(session, u) for u in SOURCE_URLS)
-        )
+        results = await asyncio.gather(*(fetch_links(session, u) for u in SOURCE_URLS))
         for r in results:
             all_links.update(r)
 
-    log(f"Total raw vless: {len(all_links):,}")
+    log(f"Total raw links: {len(all_links):,}")
+
+    log("Stage 1: TCP filtering")
 
     tcp_sem = asyncio.Semaphore(TCP_CONCURRENCY)
 
@@ -212,7 +307,7 @@ async def main():
         log("No nodes passed TCP")
         return
 
-    log("Stage 2: sing-box reality test")
+    log("Stage 2: sing-box validation")
 
     sb_sem = asyncio.Semaphore(SINGBOX_CONCURRENCY)
     counter = {"count": 0}
@@ -223,13 +318,14 @@ async def main():
     ])
 
     alive = [r for r in results if r]
+
     random.shuffle(alive)
 
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         for node in alive:
             f.write(node + "\n")
 
-    log(f"Done: {len(alive):,} high-quality nodes")
+    log(f"Done: {len(alive):,} validated nodes")
 
 
 if __name__ == "__main__":
