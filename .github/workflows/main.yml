@@ -1,42 +1,45 @@
-# .github/workflows/main.yml  (Repo-5)
-
-name: Merge & Test Alive with sing-box
+name: Merge & Test Alive Nodes
 
 on:
   schedule:
-    - cron: '30 7 * * *'
+    - cron: '30 7 * * *'           # همون زمان قبلی‌ات
   workflow_dispatch:
 
 jobs:
-  test:
+  process:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
-          pip install aiohttp pyyaml  # yaml برای ساخت config sing-box
+          python -m pip install --upgrade pip
+          pip install aiohttp pyyaml urllib3
 
-      - name: Download sing-box
+      - name: Download latest sing-box
         run: |
-          wget -O sing-box.tar.gz https://github.com/SagerNet/sing-box/releases/download/v1.12.0/sing-box-1.12.0-linux-amd64.tar.gz
-          tar -xzf sing-box.tar.gz
-          mv sing-box-*/sing-box .
+          LATEST_TAG=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+          wget -O sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/${LATEST_TAG}/sing-box-${LATEST_TAG#v}-linux-amd64.tar.gz"
+          tar -xzf sing-box.tar.gz --strip-components=1 "sing-box-${LATEST_TAG#v}-linux-amd64/sing-box"
           chmod +x sing-box
-          ./sing-box version   # چک کن کار می‌کنه
+          ./sing-box version
 
       - name: Run merge and sing-box test
-        run: python merge_and_test_singbox.py
+        run: python merge_and_test.py   # ← اسم فایل پایتون همون قبلی نگه داشته شد
 
-      - name: Commit if changed
+      - name: Commit and push if changed
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
           git add alive.txt
-          git diff --staged --quiet || git commit -m "Update alive (sing-box test) $(date +'%Y-%m-%d %H:%M UTC')"
-          git push
+          
+          git diff --staged --quiet || git commit -m "Update alive nodes (sing-box test) $(date +'%Y-%m-%d %H:%M UTC')"
+          
+          git push || echo "No changes or already up to date"
