@@ -1,5 +1,1 @@
-https://raw.githubusercontent.com/punez/Repo-4/refs/heads/main/healthy.txt
-https://raw.githubusercontent.com/punez/Repo-2/refs/heads/main/healthy.txt
-https://raw.githubusercontent.com/punez/Repo-3/refs/heads/main/healthy.txt
-https://raw.githubusercontent.com/punez/Repo-1/refs/heads/main/healthy.txt
-https://raw.githubusercontent.com/punez/Repo-0/refs/heads/main/output.txt
+https://raw.githubusercontent.com/punez/Repo-4/refs/heads/main/output/final.txt
