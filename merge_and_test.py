@@ -5,305 +5,207 @@ import yaml
 import subprocess
 import tempfile
 import os
-import random
+import socket
 import base64
 import json
 from datetime import datetime
-
-# ================= SETTINGS =================
 
 SOURCE_URLS = [
     "https://raw.githubusercontent.com/punez/Repo-4/refs/heads/main/final_sub.txt",
 ]
 
 OUTPUT_FILE = "alive.txt"
-
-TCP_TIMEOUT = 1.2
-TCP_CONCURRENCY = 200
-
-SINGBOX_CONCURRENCY = 15
-BOOT_WAIT = 2.0
-SOCKS_PORT = 10809
-
 MAX_ALIVE = 3000
+TCP_TIMEOUT = 3
+CONCURRENCY = 200
 
-# ============================================
-
+alive = []
 
 def log(msg):
-    print(f"[{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}] {msg}")
+    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    print(f"[{ts}] {msg}")
 
-
-# =========================================================
-# Fetch
-# =========================================================
+# ---------------- FETCH ---------------- #
 
 async def fetch_links(session, url):
     try:
         async with session.get(url, timeout=15) as resp:
             text = await resp.text()
-            return {l.strip() for l in text.splitlines() if l.strip()}
+            lines = [l.strip() for l in text.splitlines() if l.strip()]
+            return set(lines)
     except:
         return set()
 
+# ---------------- TCP CHECK ---------------- #
 
-# =========================================================
-# TCP Stage
-# =========================================================
-
-def extract_host_port(link):
-    try:
-        if link.startswith("vmess://"):
-            raw = link[8:].split("#")[0]
-            data = json.loads(base64.b64decode(raw + "===").decode())
-            return data.get("add"), int(data.get("port"))
-        else:
-            u = urllib.parse.urlparse(link.split("#")[0])
-            return u.hostname, u.port or 443
-    except:
-        return None, None
-
-
-async def tcp_check(host, port, sem):
-    async with sem:
+async def tcp_check(host, port, semaphore):
+    async with semaphore:
         try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, int(port)),
-                timeout=TCP_TIMEOUT
-            )
+            fut = asyncio.open_connection(host, port)
+            reader, writer = await asyncio.wait_for(fut, timeout=TCP_TIMEOUT)
             writer.close()
             await writer.wait_closed()
             return True
         except:
             return False
 
+# ---------------- PARSERS ---------------- #
 
-# =========================================================
-# Build Outbound
-# =========================================================
-
-def build_outbound(link):
-
+def parse_vless(link):
     try:
-        if link.startswith("vless://"):
-            u = urllib.parse.urlparse(link)
-            q = urllib.parse.parse_qs(u.query)
-
-            outbound = {
-                "type": "vless",
-                "tag": "probe",
-                "server": u.hostname,
-                "server_port": u.port or 443,
-                "uuid": u.username
-            }
-
-            security = q.get("security", [""])[0]
-
-            if security in ["tls", "reality"]:
-                outbound["tls"] = {
-                    "enabled": True,
-                    "server_name": q.get("sni", [u.hostname])[0]
-                }
-
-                if security == "reality":
-                    outbound["tls"]["reality"] = {
-                        "enabled": True,
-                        "public_key": q.get("pbk", [""])[0],
-                        "short_id": q.get("sid", [""])[0]
-                    }
-
-            if q.get("type", ["tcp"])[0] == "ws":
-                outbound["transport"] = {
-                    "type": "ws",
-                    "path": q.get("path", ["/"])[0],
-                    "headers": {"Host": q.get("host", [""])[0]}
-                }
-
-            return outbound
-
-        if link.startswith("trojan://"):
-            u = urllib.parse.urlparse(link)
-            q = urllib.parse.parse_qs(u.query)
-
-            return {
-                "type": "trojan",
-                "tag": "probe",
-                "server": u.hostname,
-                "server_port": u.port or 443,
-                "password": u.username,
-                "tls": {
-                    "enabled": True,
-                    "server_name": q.get("sni", [u.hostname])[0]
-                }
-            }
-
-        if link.startswith("vmess://"):
-            raw = link[8:].split("#")[0]
-            data = json.loads(base64.b64decode(raw + "===").decode())
-
-            outbound = {
-                "type": "vmess",
-                "tag": "probe",
-                "server": data["add"],
-                "server_port": int(data["port"]),
-                "uuid": data["id"],
-                "security": data.get("scy", "auto")
-            }
-
-            if data.get("tls") == "tls":
-                outbound["tls"] = {
-                    "enabled": True,
-                    "server_name": data.get("sni", data["add"])
-                }
-
-            return outbound
-
+        u = urllib.parse.urlparse(link)
+        params = urllib.parse.parse_qs(u.query)
+        return {
+            "type": "vless",
+            "server": u.hostname,
+            "port": u.port or 443,
+            "uuid": u.username,
+            "security": params.get("security", [""])[0],
+        }
     except:
         return None
 
-    return None
+def parse_trojan(link):
+    try:
+        u = urllib.parse.urlparse(link)
+        return {
+            "type": "trojan",
+            "server": u.hostname,
+            "port": u.port or 443,
+            "password": u.username,
+        }
+    except:
+        return None
 
+def parse_vmess(link):
+    try:
+        raw = link.replace("vmess://", "")
+        decoded = base64.b64decode(raw + "=" * (-len(raw) % 4)).decode()
+        data = json.loads(decoded)
+        return {
+            "type": "vmess",
+            "server": data.get("add"),
+            "port": int(data.get("port")),
+            "uuid": data.get("id"),
+        }
+    except:
+        return None
+
+# ---------------- BUILD CONFIG ---------------- #
 
 def build_config(outbound):
     return yaml.safe_dump({
-        "log": {"level": "error"},
+        "log": {"level": "silent"},
         "inbounds": [{
             "type": "socks",
             "tag": "socks-in",
             "listen": "127.0.0.1",
-            "listen_port": SOCKS_PORT
+            "listen_port": 10809
         }],
         "outbounds": [
             outbound,
             {"type": "direct", "tag": "direct"}
         ],
         "route": {
-            "rules": [{"outbound": "probe"}]
+            "rules": [{"outbound": outbound["tag"]}]
         }
     }, sort_keys=False)
 
+def build_outbound(parsed):
+    if parsed["type"] == "vless":
+        return {
+            "type": "vless",
+            "tag": "proxy",
+            "server": parsed["server"],
+            "server_port": parsed["port"],
+            "uuid": parsed["uuid"]
+        }
+    elif parsed["type"] == "trojan":
+        return {
+            "type": "trojan",
+            "tag": "proxy",
+            "server": parsed["server"],
+            "server_port": parsed["port"],
+            "password": parsed["password"]
+        }
+    elif parsed["type"] == "vmess":
+        return {
+            "type": "vmess",
+            "tag": "proxy",
+            "server": parsed["server"],
+            "server_port": parsed["port"],
+            "uuid": parsed["uuid"]
+        }
 
-# =========================================================
-# Handshake Test (Real outbound usage)
-# =========================================================
+# ---------------- SING-BOX CHECK ---------------- #
 
-async def singbox_test(link, sem, counter):
+def singbox_check(config_str):
+    with tempfile.NamedTemporaryFile(mode='w', delete=False) as tmp:
+        tmp.write(config_str)
+        path = tmp.name
+    try:
+        subprocess.run(["./sing-box", "check", "-c", path],
+                       capture_output=True,
+                       timeout=5,
+                       check=True)
+        return True
+    except:
+        return False
+    finally:
+        os.remove(path)
 
-    async with sem:
-
-        if counter["count"] >= MAX_ALIVE:
-            return None
-
-        outbound = build_outbound(link)
-        if not outbound:
-            return None
-
-        config = build_config(outbound)
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".yaml", mode="w") as f:
-            f.write(config)
-            path = f.name
-
-        try:
-            subprocess.run(
-                ["./sing-box", "check", "-c", path],
-                timeout=5,
-                capture_output=True,
-                check=True
-            )
-
-            proc = await asyncio.create_subprocess_exec(
-                "./sing-box", "run", "-c", path,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL
-            )
-
-            await asyncio.sleep(BOOT_WAIT)
-
-            # اتصال ساده از داخل socks برای فعال شدن outbound
-            test = await asyncio.create_subprocess_exec(
-                "curl",
-                "-x", f"socks5h://127.0.0.1:{SOCKS_PORT}",
-                "--connect-timeout", "3",
-                "-s",
-                "http://1.1.1.1",
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL
-            )
-
-            await test.wait()
-
-            proc.terminate()
-            await proc.wait()
-
-            if test.returncode == 0:
-                counter["count"] += 1
-                return link
-
-        except:
-            pass
-        finally:
-            if os.path.exists(path):
-                os.unlink(path)
-
-        return None
-
-
-# =========================================================
-# MAIN
-# =========================================================
+# ---------------- MAIN ---------------- #
 
 async def main():
-
     log("Stage 1: Fetch")
-
-    all_links = set()
-
     async with aiohttp.ClientSession() as session:
-        results = await asyncio.gather(*(fetch_links(session, u) for u in SOURCE_URLS))
-        for r in results:
-            all_links.update(r)
+        tasks = [fetch_links(session, url) for url in SOURCE_URLS]
+        results = await asyncio.gather(*tasks)
+        all_links = set().union(*results)
 
     log(f"Total raw links: {len(all_links):,}")
 
-    log("Stage 1: TCP filtering")
+    log("Stage 2: TCP filtering")
+    semaphore = asyncio.Semaphore(CONCURRENCY)
+    tcp_pass = []
 
-    tcp_sem = asyncio.Semaphore(TCP_CONCURRENCY)
+    async def process(link):
+        parsed = None
+        if link.startswith("vless://"):
+            parsed = parse_vless(link)
+        elif link.startswith("trojan://"):
+            parsed = parse_trojan(link)
+        elif link.startswith("vmess://"):
+            parsed = parse_vmess(link)
 
-    tcp_results = await asyncio.gather(*[
-        tcp_check(*extract_host_port(link), tcp_sem)
-        if extract_host_port(link)[0] else asyncio.sleep(0)
-        for link in all_links
-    ])
+        if not parsed or not parsed.get("server"):
+            return None
 
-    stage1 = [link for link, ok in zip(all_links, tcp_results) if ok]
+        ok = await tcp_check(parsed["server"], parsed["port"], semaphore)
+        if ok:
+            return (link, parsed)
+        return None
 
-    log(f"After TCP filter: {len(stage1):,}")
+    results = await asyncio.gather(*[process(l) for l in all_links])
+    tcp_pass = [r for r in results if r]
 
-    if not stage1:
-        log("No nodes passed TCP")
-        return
+    log(f"After TCP filter: {len(tcp_pass):,}")
 
-    log("Stage 2: Outbound handshake validation")
+    log("Stage 3: sing-box config validation")
 
-    sb_sem = asyncio.Semaphore(SINGBOX_CONCURRENCY)
-    counter = {"count": 0}
-
-    results = await asyncio.gather(*[
-        singbox_test(link, sb_sem, counter)
-        for link in stage1
-    ])
-
-    alive = [r for r in results if r]
-
-    random.shuffle(alive)
+    for link, parsed in tcp_pass:
+        outbound = build_outbound(parsed)
+        config = build_config(outbound)
+        if singbox_check(config):
+            alive.append(link)
+        if len(alive) >= MAX_ALIVE:
+            break
 
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        for node in alive:
-            f.write(node + "\n")
+        for l in alive:
+            f.write(l + "\n")
 
     log(f"Done: {len(alive):,} validated nodes")
-
 
 if __name__ == "__main__":
     asyncio.run(main())
