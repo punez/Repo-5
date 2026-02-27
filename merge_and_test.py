@@ -11,10 +11,10 @@ SOURCE_URLS = [
 ]
 
 OUTPUT_FILE = "alive.txt"
-MAX_ALIVE = 5000
 TCP_TIMEOUT = 3
 CONCURRENCY = 300
-LATENCY_LIMIT_MS = 300  # فقط زیر 300ms
+LATENCY_LIMIT_MS = 300
+TOP_PERCENT = 0.30  # فقط سریع‌ترین 30٪
 
 def log(msg):
     ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -47,7 +47,7 @@ def parse_link(link):
         return None
     return None
 
-# ---------------- TCP + LATENCY ---------------- #
+# ---------------- TCP LATENCY ---------------- #
 
 async def tcp_latency(host, port, semaphore):
     async with semaphore:
@@ -57,7 +57,7 @@ async def tcp_latency(host, port, semaphore):
                 asyncio.open_connection(host, port),
                 timeout=TCP_TIMEOUT
             )
-            latency = (time.perf_counter() - start) * 1000  # ms
+            latency = (time.perf_counter() - start) * 1000
             writer.close()
             await writer.wait_closed()
             return latency
@@ -75,10 +75,9 @@ async def main():
         all_links = set().union(*results)
 
     log(f"Total raw links: {len(all_links):,}")
-    log("Stage 2: TCP latency filtering (<300ms)")
+    log("Stage 2: TCP latency filtering (<300ms + double check)")
 
     semaphore = asyncio.Semaphore(CONCURRENCY)
-    results = []
 
     async def process(link):
         parsed = parse_link(link)
@@ -89,26 +88,38 @@ async def main():
         if not host or not port:
             return None
 
-        latency = await tcp_latency(host, port, semaphore)
-        if latency is not None and latency < LATENCY_LIMIT_MS:
-            return (link, latency)
-        return None
+        # تست اول
+        latency1 = await tcp_latency(host, port, semaphore)
+        if latency1 is None or latency1 >= LATENCY_LIMIT_MS:
+            return None
+
+        # تست دوم
+        latency2 = await tcp_latency(host, port, semaphore)
+        if latency2 is None or latency2 >= LATENCY_LIMIT_MS:
+            return None
+
+        avg_latency = (latency1 + latency2) / 2
+        return (link, avg_latency)
 
     tasks = [process(l) for l in all_links]
     checked = await asyncio.gather(*tasks)
 
     valid = [r for r in checked if r]
 
+    log(f"Passed double-check: {len(valid):,}")
+
     # مرتب‌سازی بر اساس سریع‌ترین
     valid.sort(key=lambda x: x[1])
 
-    final_nodes = [v[0] for v in valid][:MAX_ALIVE]
+    # فقط سریع‌ترین 30٪
+    cut_count = int(len(valid) * TOP_PERCENT)
+    final_nodes = [v[0] for v in valid[:cut_count]]
 
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         for node in final_nodes:
             f.write(node + "\n")
 
-    log(f"Done: {len(final_nodes):,} fast TCP nodes (<{LATENCY_LIMIT_MS}ms)")
+    log(f"Done: {len(final_nodes):,} elite fast nodes (top 30%)")
 
 if __name__ == "__main__":
     asyncio.run(main())
