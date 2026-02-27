@@ -1,0 +1,33 @@
+name: Repo-5 Alive Filter
+
+on:
+  schedule:
+    - cron: "30 3 * * *"   # 07:00 AM Iran (UTC+3:30)
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Requirements
+        run: pip install aiohttp
+
+      - name: Run Collector
+        run: python collector5.py
+
+      - name: Commit Output
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add alive.txt
+          git commit -m "Daily alive update" || echo "No changes"
+          git push
