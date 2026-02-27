@@ -5,7 +5,6 @@ import yaml
 import subprocess
 import tempfile
 import os
-import socket
 import base64
 import json
 from datetime import datetime
@@ -31,8 +30,7 @@ async def fetch_links(session, url):
     try:
         async with session.get(url, timeout=15) as resp:
             text = await resp.text()
-            lines = [l.strip() for l in text.splitlines() if l.strip()]
-            return set(lines)
+            return {l.strip() for l in text.splitlines() if l.strip()}
     except:
         return set()
 
@@ -41,55 +39,86 @@ async def fetch_links(session, url):
 async def tcp_check(host, port, semaphore):
     async with semaphore:
         try:
-            fut = asyncio.open_connection(host, port)
-            reader, writer = await asyncio.wait_for(fut, timeout=TCP_TIMEOUT)
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port),
+                timeout=TCP_TIMEOUT
+            )
             writer.close()
             await writer.wait_closed()
             return True
         except:
             return False
 
-# ---------------- PARSERS ---------------- #
+# ---------------- PARSE ---------------- #
 
-def parse_vless(link):
+def parse_link(link):
     try:
-        u = urllib.parse.urlparse(link)
-        params = urllib.parse.parse_qs(u.query)
+        if link.startswith("vless://"):
+            u = urllib.parse.urlparse(link)
+            return {
+                "type": "vless",
+                "server": u.hostname,
+                "port": u.port or 443,
+                "uuid": u.username
+            }
+
+        if link.startswith("trojan://"):
+            u = urllib.parse.urlparse(link)
+            return {
+                "type": "trojan",
+                "server": u.hostname,
+                "port": u.port or 443,
+                "password": u.username
+            }
+
+        if link.startswith("vmess://"):
+            raw = link.replace("vmess://", "")
+            decoded = base64.b64decode(raw + "=" * (-len(raw) % 4)).decode()
+            data = json.loads(decoded)
+            return {
+                "type": "vmess",
+                "server": data.get("add"),
+                "port": int(data.get("port")),
+                "uuid": data.get("id")
+            }
+
+    except:
+        return None
+
+    return None
+
+# ---------------- BUILD OUTBOUND ---------------- #
+
+def build_outbound(p):
+    if p["type"] == "vless":
         return {
             "type": "vless",
-            "server": u.hostname,
-            "port": u.port or 443,
-            "uuid": u.username,
-            "security": params.get("security", [""])[0],
+            "tag": "proxy",
+            "server": p["server"],
+            "server_port": p["port"],
+            "uuid": p["uuid"],
+            "tls": {"enabled": True}
         }
-    except:
-        return None
 
-def parse_trojan(link):
-    try:
-        u = urllib.parse.urlparse(link)
+    if p["type"] == "trojan":
         return {
             "type": "trojan",
-            "server": u.hostname,
-            "port": u.port or 443,
-            "password": u.username,
+            "tag": "proxy",
+            "server": p["server"],
+            "server_port": p["port"],
+            "password": p["password"],
+            "tls": {"enabled": True}
         }
-    except:
-        return None
 
-def parse_vmess(link):
-    try:
-        raw = link.replace("vmess://", "")
-        decoded = base64.b64decode(raw + "=" * (-len(raw) % 4)).decode()
-        data = json.loads(decoded)
+    if p["type"] == "vmess":
         return {
             "type": "vmess",
-            "server": data.get("add"),
-            "port": int(data.get("port")),
-            "uuid": data.get("id"),
+            "tag": "proxy",
+            "server": p["server"],
+            "server_port": p["port"],
+            "uuid": p["uuid"],
+            "tls": {"enabled": True}
         }
-    except:
-        return None
 
 # ---------------- BUILD CONFIG ---------------- #
 
@@ -107,47 +136,27 @@ def build_config(outbound):
             {"type": "direct", "tag": "direct"}
         ],
         "route": {
-            "rules": [{"outbound": outbound["tag"]}]
+            "rules": [{
+                "inbound": "socks-in",
+                "outbound": "proxy"
+            }]
         }
     }, sort_keys=False)
 
-def build_outbound(parsed):
-    if parsed["type"] == "vless":
-        return {
-            "type": "vless",
-            "tag": "proxy",
-            "server": parsed["server"],
-            "server_port": parsed["port"],
-            "uuid": parsed["uuid"]
-        }
-    elif parsed["type"] == "trojan":
-        return {
-            "type": "trojan",
-            "tag": "proxy",
-            "server": parsed["server"],
-            "server_port": parsed["port"],
-            "password": parsed["password"]
-        }
-    elif parsed["type"] == "vmess":
-        return {
-            "type": "vmess",
-            "tag": "proxy",
-            "server": parsed["server"],
-            "server_port": parsed["port"],
-            "uuid": parsed["uuid"]
-        }
+# ---------------- SINGBOX CHECK ---------------- #
 
-# ---------------- SING-BOX CHECK ---------------- #
-
-def singbox_check(config_str):
+def singbox_check(cfg):
     with tempfile.NamedTemporaryFile(mode='w', delete=False) as tmp:
-        tmp.write(config_str)
+        tmp.write(cfg)
         path = tmp.name
     try:
-        subprocess.run(["./sing-box", "check", "-c", path],
-                       capture_output=True,
-                       timeout=5,
-                       check=True)
+        subprocess.run(
+            ["./sing-box", "check", "-c", path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=True
+        )
         return True
     except:
         return False
@@ -167,20 +176,11 @@ async def main():
 
     log("Stage 2: TCP filtering")
     semaphore = asyncio.Semaphore(CONCURRENCY)
-    tcp_pass = []
 
     async def process(link):
-        parsed = None
-        if link.startswith("vless://"):
-            parsed = parse_vless(link)
-        elif link.startswith("trojan://"):
-            parsed = parse_trojan(link)
-        elif link.startswith("vmess://"):
-            parsed = parse_vmess(link)
-
+        parsed = parse_link(link)
         if not parsed or not parsed.get("server"):
             return None
-
         ok = await tcp_check(parsed["server"], parsed["port"], semaphore)
         if ok:
             return (link, parsed)
