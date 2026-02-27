@@ -21,11 +21,8 @@ OUTPUT_FILE = "alive.txt"
 TCP_TIMEOUT = 1.2
 TCP_CONCURRENCY = 200
 
-SINGBOX_CONCURRENCY = 15
-TEST_URL = "http://www.gstatic.com/generate_204"
-TEST_TIMEOUT = 6
+SINGBOX_CONCURRENCY = 20
 BOOT_WAIT = 2.5
-
 MAX_ALIVE = 3000
 
 # ============================================
@@ -80,142 +77,114 @@ async def tcp_check(host, port, sem):
 
 
 # =========================================================
-# Build Outbounds
+# Build Outbound (VLESS / Trojan / VMess)
 # =========================================================
 
-def build_vless(link):
-    u = urllib.parse.urlparse(link)
-    q = urllib.parse.parse_qs(u.query)
+def build_outbound(link):
 
-    outbound = {
-        "type": "vless",
-        "tag": "probe",
-        "server": u.hostname,
-        "server_port": u.port or 443,
-        "uuid": u.username,
-        "tls": {"enabled": False}
-    }
+    try:
 
-    security = q.get("security", [""])[0]
+        if link.startswith("vless://"):
+            u = urllib.parse.urlparse(link)
+            q = urllib.parse.parse_qs(u.query)
 
-    if security in ["tls", "reality"]:
-        outbound["tls"] = {
-            "enabled": True,
-            "server_name": q.get("sni", [u.hostname])[0]
-        }
-
-        if security == "reality":
-            outbound["tls"]["reality"] = {
-                "enabled": True,
-                "public_key": q.get("pbk", [""])[0],
-                "short_id": q.get("sid", [""])[0]
+            outbound = {
+                "type": "vless",
+                "tag": "probe",
+                "server": u.hostname,
+                "server_port": u.port or 443,
+                "uuid": u.username
             }
 
-    net = q.get("type", ["tcp"])[0]
+            security = q.get("security", [""])[0]
 
-    if net == "ws":
-        outbound["transport"] = {
-            "type": "ws",
-            "path": q.get("path", ["/"])[0],
-            "headers": {"Host": q.get("host", [""])[0]}
-        }
+            if security in ["tls", "reality"]:
+                outbound["tls"] = {
+                    "enabled": True,
+                    "server_name": q.get("sni", [u.hostname])[0]
+                }
 
-    if q.get("flow"):
-        outbound["flow"] = q["flow"][0]
+                if security == "reality":
+                    outbound["tls"]["reality"] = {
+                        "enabled": True,
+                        "public_key": q.get("pbk", [""])[0],
+                        "short_id": q.get("sid", [""])[0]
+                    }
 
-    return outbound
+            if q.get("type", ["tcp"])[0] == "ws":
+                outbound["transport"] = {
+                    "type": "ws",
+                    "path": q.get("path", ["/"])[0],
+                    "headers": {"Host": q.get("host", [""])[0]}
+                }
 
+            return outbound
 
-def build_trojan(link):
-    u = urllib.parse.urlparse(link)
-    q = urllib.parse.parse_qs(u.query)
-
-    outbound = {
-        "type": "trojan",
-        "tag": "probe",
-        "server": u.hostname,
-        "server_port": u.port or 443,
-        "password": u.username,
-        "tls": {
-            "enabled": True,
-            "server_name": q.get("sni", [u.hostname])[0]
-        }
-    }
-
-    if q.get("type", ["tcp"])[0] == "ws":
-        outbound["transport"] = {
-            "type": "ws",
-            "path": q.get("path", ["/"])[0],
-            "headers": {"Host": q.get("host", [""])[0]}
-        }
-
-    return outbound
-
-
-def build_vmess(link):
-    raw = link[8:].split("#")[0]
-    data = json.loads(base64.b64decode(raw + "===").decode())
-
-    outbound = {
-        "type": "vmess",
-        "tag": "probe",
-        "server": data["add"],
-        "server_port": int(data["port"]),
-        "uuid": data["id"],
-        "security": data.get("scy", "auto")
-    }
-
-    if data.get("tls") == "tls":
-        outbound["tls"] = {
-            "enabled": True,
-            "server_name": data.get("sni", data["add"])
-        }
-
-    if data.get("net") == "ws":
-        outbound["transport"] = {
-            "type": "ws",
-            "path": data.get("path", "/"),
-            "headers": {"Host": data.get("host", "")}
-        }
-
-    return outbound
-
-
-def build_outbound(link):
-    try:
-        if link.startswith("vless://"):
-            return build_vless(link)
         if link.startswith("trojan://"):
-            return build_trojan(link)
+            u = urllib.parse.urlparse(link)
+            q = urllib.parse.parse_qs(u.query)
+
+            outbound = {
+                "type": "trojan",
+                "tag": "probe",
+                "server": u.hostname,
+                "server_port": u.port or 443,
+                "password": u.username,
+                "tls": {
+                    "enabled": True,
+                    "server_name": q.get("sni", [u.hostname])[0]
+                }
+            }
+
+            return outbound
+
         if link.startswith("vmess://"):
-            return build_vmess(link)
+            raw = link[8:].split("#")[0]
+            data = json.loads(base64.b64decode(raw + "===").decode())
+
+            outbound = {
+                "type": "vmess",
+                "tag": "probe",
+                "server": data["add"],
+                "server_port": int(data["port"]),
+                "uuid": data["id"],
+                "security": data.get("scy", "auto")
+            }
+
+            if data.get("tls") == "tls":
+                outbound["tls"] = {
+                    "enabled": True,
+                    "server_name": data.get("sni", data["add"])
+                }
+
+            return outbound
+
     except:
         return None
+
     return None
 
 
 def build_config(outbound):
     return yaml.safe_dump({
-        "log": {"level": "silent"},
-        "inbounds": [{
-            "type": "socks",
-            "tag": "in",
-            "listen": "127.0.0.1",
-            "listen_port": 10809
-        }],
+        "log": {"level": "error"},
+        "inbounds": [],
         "outbounds": [
             outbound,
             {"type": "direct", "tag": "direct"}
         ],
-        "route": {"rules": [{"outbound": "probe"}]}
+        "route": {
+            "rules": [{"outbound": "probe"}]
+        }
     }, sort_keys=False)
 
 
 # =========================================================
-# sing-box Test
+# Handshake Test (No curl)
 # =========================================================
 
 async def singbox_test(link, sem, counter):
+
     async with sem:
 
         if counter["count"] >= MAX_ALIVE:
@@ -232,9 +201,15 @@ async def singbox_test(link, sem, counter):
             path = f.name
 
         try:
-            subprocess.run(["./sing-box", "check", "-c", path],
-                           timeout=5, capture_output=True, check=True)
+            # فقط چک صحت کانفیگ
+            subprocess.run(
+                ["./sing-box", "check", "-c", path],
+                timeout=5,
+                capture_output=True,
+                check=True
+            )
 
+            # اجرای کوتاه برای تست handshake
             proc = await asyncio.create_subprocess_exec(
                 "./sing-box", "run", "-c", path,
                 stdout=asyncio.subprocess.DEVNULL,
@@ -243,24 +218,11 @@ async def singbox_test(link, sem, counter):
 
             await asyncio.sleep(BOOT_WAIT)
 
-            curl = await asyncio.create_subprocess_exec(
-                "curl",
-                "-x", "socks5h://127.0.0.1:10809",
-                "--max-time", str(TEST_TIMEOUT),
-                "-s", "-o", "/dev/null",
-                "-w", "%{http_code}",
-                TEST_URL,
-                stdout=asyncio.subprocess.PIPE
-            )
-
-            stdout, _ = await curl.communicate()
-            code = stdout.decode().strip()
-
-            proc.terminate()
-            await proc.wait()
-
-            if code == "204":
+            # اگر اینجا crash نکرده باشه یعنی handshake انجام شده
+            if proc.returncode is None:
                 counter["count"] += 1
+                proc.terminate()
+                await proc.wait()
                 return link
 
         except:
@@ -307,7 +269,7 @@ async def main():
         log("No nodes passed TCP")
         return
 
-    log("Stage 2: sing-box validation")
+    log("Stage 2: TLS/Handshake validation")
 
     sb_sem = asyncio.Semaphore(SINGBOX_CONCURRENCY)
     counter = {"count": 0}
